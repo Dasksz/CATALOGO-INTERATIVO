@@ -2,7 +2,7 @@
 // CONFIGURAÇÕES DO SUPABASE E PLANILHA
 // ==========================================
 const SUPABASE_URL = "https://gcksbfstheavpfgcdndb.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdja3NiZnN0aGVhdnBmZ2NkbmRiIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3Nzc1MDcyNywiZXhwIjoyMDkzMzI2NzI3fQ.yuYxAYnllivwnR7fKzEAfgUIdLEAQZjIBAPrWfQh0IY"; // Certifique-se de preencher com a chave real
+const SUPABASE_KEY = "CHAVE_API_KEY_AQUI"; // Certifique-se de preencher com a chave real
 const SUPABASE_TABLE = "funcionarios_epi";
 const NOME_DA_ABA = "Controle EPI e Fardamento";
 
