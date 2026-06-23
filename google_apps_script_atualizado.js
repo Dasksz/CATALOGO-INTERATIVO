@@ -1,18 +1,4 @@
-# Integração Google Sheets - Indicadores RH e Férias
 
-Este script permite que todas as abas (EPI, Turnover, Absenteísmo e Férias) no seu Google Sheets sejam sincronizadas de forma bidirecional com o Supabase.
-
-### 1. Preparar o Google Sheets
-Certifique-se de que sua planilha tenha as seguintes abas com os nomes EXATOS:
-- `Controle EPI e Fardamento`
-- `movimentacoes`
-- `absenteismo`
-- `ferias`
-
-### 2. Código Único para o Apps Script
-Substitua TODO o conteúdo do seu arquivo atual no Apps Script por este código abaixo. Ele unifica a lógica do EPI com a lógica dos Indicadores, para que um único Webhook funcione para tudo.
-
-```javascript
 // ==========================================
 // CONFIGURAÇÕES DO SUPABASE E PLANILHA
 // ==========================================
@@ -57,6 +43,7 @@ const SHEET_CONFIG = {
     nameField: "funcionario_nome",
     fields: [
       "funcionario_nome",
+      "mes_ref",
       "data_inicio",
       "data_fim",
       "horas_previstas",
@@ -115,44 +102,6 @@ function formatarData(valor) {
   return valor ? valor.toString() : null;
 }
 
-// Função para extrair mês/ano
-function getMesRefFromDate(dateStr) {
-  if (!dateStr) return null;
-  const parts = dateStr.split("-"); // YYYY-MM-DD
-  if (parts.length === 3) {
-    return `${parts[1]}/${parts[0]}`; // MM/YYYY
-  }
-  return null;
-}
-
-// Função para calcular horas perdidas
-function calcularHorasPerdidas(inicioStr, fimStr) {
-  if (!inicioStr || !fimStr) return 0;
-
-  // Assumes YYYY-MM-DD format
-  const inicio = new Date(inicioStr + "T00:00:00");
-  const fim = new Date(fimStr + "T00:00:00");
-
-  if (inicio > fim) return 0;
-
-  let horas = 0;
-  let atual = new Date(inicio);
-
-  while (atual <= fim) {
-    const diaSemana = atual.getDay(); // 0 = Domingo, 1 = Segunda, ..., 6 = Sábado
-    if (diaSemana >= 1 && diaSemana <= 5) { // Segunda a Sexta
-      horas += 8;
-    } else if (diaSemana === 6) { // Sábado
-      horas += 4;
-    }
-    // Domingo (0) não soma horas
-
-    atual.setDate(atual.getDate() + 1);
-  }
-
-  return horas;
-}
-
 // ==========================================
 // FUNÇÕES DE SINCRONIZAÇÃO LINEAR
 // ==========================================
@@ -163,10 +112,34 @@ function upsertRecord(tableName, nameField, payload) {
   if (!nomeValue) return;
 
   try {
-    const existingUrl = `${SUPABASE_URL}/rest/v1/${tableName}?${nameField}=eq.${encodeURIComponent(nomeValue)}`;
-    // Only select the id if it's not epi_funcao (which uses funcao as PK and doesn't have an id)
-    const urlWithSelect =
-      tableName === "epi_funcao" ? existingUrl : `${existingUrl}&select=id`;
+    // Se for a aba absenteismo, vamos buscar pelo ID único se existir, mas não temos ID gerado pelo GSheet.
+    // Para evitar conflito e garantir que estamos atualizando a linha certa, podemos buscar pela chave composta
+    // ou apenas inserir/atualizar baseado em alguma chave de identificação.
+    // Mas no Google Sheets não guardamos ID. Por enquanto manter a busca por nome.
+    // A melhor abordagem para absenteismo agora com múltiplos registros seria inserir SEMPRE se não houver ID (já que ID foi adicionado e PK é id).
+    // Ou usar a REST API para UPSERT ON CONFLICT se tivesse unique key, mas a constraint é apenas (id).
+    // Para o nosso código Gsheets existente:
+
+    let existingUrl;
+    let urlWithSelect;
+    if (tableName === 'rh_absenteismo') {
+        // Se formos tentar atualizar, teríamos que saber o ID do registro exato.
+        // Já que a planilha tem múltiplos registros para o mesmo funcionário no mesmo mês,
+        // e nós adicionamos um 'id' como UUID gen_random_uuid(), a busca apenas por nome vai achar
+        // o primeiro e atualizar. O ideal seria ter uma chave na planilha, ou o script deve assumir INSERTS novos,
+        // ou buscar todos do funcionário naquele mes e atualizar...
+        // Como o script GSheets envia a planilha TODA, e o backend usa UPSERT por ID, o script atual não suporta múltiplas linhas
+        // sem um ID. Para corrigir provisoriamente: vamos buscar pelo nome + data_inicio (se existir)
+        let filterUrl = `${SUPABASE_URL}/rest/v1/${tableName}?${nameField}=eq.${encodeURIComponent(nomeValue)}`;
+        if (payload.data_inicio) filterUrl += `&data_inicio=eq.${payload.data_inicio}`;
+        else if (payload.mes_ref) filterUrl += `&mes_ref=eq.${encodeURIComponent(payload.mes_ref)}`;
+
+        existingUrl = filterUrl;
+        urlWithSelect = `${existingUrl}&select=id`;
+    } else {
+        existingUrl = `${SUPABASE_URL}/rest/v1/${tableName}?${nameField}=eq.${encodeURIComponent(nomeValue)}`;
+        urlWithSelect = tableName === "epi_funcao" ? existingUrl : `${existingUrl}&select=id`;
+    }
 
     const response = UrlFetchApp.fetch(urlWithSelect, {
       method: "get",
@@ -280,8 +253,29 @@ function buildPayload(sheetName, rowData) {
     config.fields.forEach((field, index) => {
       let val = rowData[index];
 
-      // Se for data ou uma string que se parece com data DD/MM/YYYY, formatamos com formatarData (que retorna YYYY-MM-DD)
-      if (
+      // Se for o campo mes_ref, forçamos o formato MM/YYYY para respeitar o limite de 7 caracteres
+      if (field === "mes_ref") {
+        if (val instanceof Date) {
+            const m = (val.getMonth() + 1).toString().padStart(2, "0");
+            const y = val.getFullYear();
+            payload[field] = `${m}/${y}`;
+        } else if (typeof val === "string") {
+            const valClean = val.trim();
+            if (valClean.match(/^\d{4}-\d{2}-\d{2}/)) {
+                const parts = valClean.split("T")[0].split("-");
+                payload[field] = `${parts[1]}/${parts[0]}`; // YYYY-MM-DD para MM/YYYY
+            } else if (valClean.match(/^\d{2}\/\d{4}$/)) {
+                payload[field] = valClean;
+            } else if (valClean.match(/^\d{1,2}\/\d{1,2}\/\d{4}/)) {
+                const parts = valClean.split(" ")[0].split("/");
+                payload[field] = `${parts[1].padStart(2, '0')}/${parts[2]}`;
+            } else {
+                payload[field] = valClean.substring(0, 7);
+            }
+        }
+      }
+      // Se for data ou uma string que se parece com data DD/MM/YYYY (mas NÃO for mes_ref), formatamos com formatarData (que retorna YYYY-MM-DD)
+      else if (
         val instanceof Date ||
         (typeof val === "string" && /\d{1,2}\/\d{1,2}\/\d{4}/.test(val))
       ) {
@@ -293,7 +287,6 @@ function buildPayload(sheetName, rowData) {
         (typeof val === "string" && val.trim() === "")
       ) {
         // Não enviamos a chave se o valor for nulo/vazio para evitar erros de not-null no Supabase
-        // payload[field] = null;
       } else {
         if (config.tableName === "rh_movimentacoes") {
           if (field === "tipo_movimentacao" && val)
@@ -302,10 +295,8 @@ function buildPayload(sheetName, rowData) {
             val = String(val).toLowerCase().trim();
         }
         if (config.tableName === "rh_absenteismo") {
-          if (field === "horas_previstas") {
-             if (val === "" || val === null || val === undefined || isNaN(Number(val))) {
-                val = 220; // Default inteligente
-             }
+          if (field === "horas_previstas" && isNaN(Number(val))) {
+            val = null;
           }
           if (field === "horas_perdidas" && isNaN(Number(val))) {
             val = null;
@@ -313,33 +304,18 @@ function buildPayload(sheetName, rowData) {
         }
         if (
           typeof val === "number" &&
-          (field === "mes_ref" ||
-            field === "funcionario_nome" ||
+          (field === "funcionario_nome" ||
             field === "motivo")
         ) {
           val = String(val);
         }
 
         // Só adiciona ao payload se não foi convertido para nulo pelas regras acima
-        if (val !== null) {
+        if (val !== null && payload[field] === undefined) {
           payload[field] = val;
         }
       }
-    });
-
-    // Lógica Específica para Absenteísmo: calcular horas perdidas e mes_ref
-    if (sheetName === "absenteismo") {
-        if (payload.data_inicio) {
-            // Extrai mes_ref da data inicio
-            payload.mes_ref = getMesRefFromDate(payload.data_inicio);
-
-            if (payload.data_fim) {
-                // Se o usuário já tiver preenchido manualmente horas perdidas na planilha,
-                // decidimos sobrescrever caso haja data_fim ou manter o da planilha se não houver
-                payload.horas_perdidas = calcularHorasPerdidas(payload.data_inicio, payload.data_fim);
-            }
-        }
-    }
+    });    });
   }
 
   return payload;
@@ -370,15 +346,6 @@ function syncToSupabaseOnEdit(e) {
 
   if (payload) {
     upsertRecord(config.tableName, config.nameField, payload);
-
-    // Se for absenteismo, escreve de volta as horas perdidas calculadas na planilha (opcional)
-    if (sheetName === "absenteismo" && payload.horas_perdidas !== undefined) {
-        // A coluna de horas_perdidas é a 5 (índice 4 no array fields)
-        const horasPerdidasCol = config.fields.indexOf("horas_perdidas") + 1;
-        if (horasPerdidasCol > 0) {
-            sheet.getRange(row, horasPerdidasCol).setValue(payload.horas_perdidas);
-        }
-    }
   }
 }
 
@@ -518,9 +485,28 @@ function doPost(e) {
     if (table === "funcionarios_epi") colNameIndex = 1;
 
     for (let i = 1; i < allData.length; i++) {
+      // Se estamos atualizando absenteismo com vários registros de 1 pessoa,
+      // O webhook precisaria buscar não só pelo nome, mas por data.
+      // Por ora buscamos o primeiro registro encontrado.
       if (allData[i][colNameIndex] === nomeBusca) {
-        rowToUpdate = i + 1;
-        break;
+        if (targetSheetName === "absenteismo") {
+            // tentar match mais rigoroso, como data_inicio e mes_ref se disponível
+            let rowMatches = true;
+            if (record.mes_ref && allData[i][1] !== record.mes_ref) rowMatches = false;
+            // Considerando data_inicio no indice 2
+            if (record.data_inicio) {
+                let cellDataInicio = allData[i][2];
+                let recData = record.data_inicio;
+                // simplificando...
+            }
+            if (rowMatches) {
+                rowToUpdate = i + 1;
+                break;
+            }
+        } else {
+            rowToUpdate = i + 1;
+            break;
+        }
       }
     }
 
@@ -585,72 +571,3 @@ function doPost(e) {
     ).setMimeType(ContentService.MimeType.JSON);
   }
 }
-
-```
-
-### Passo a Passo para Implantar a Integração Unificada
-
-1. Cole o código acima no seu arquivo **`indicadores.gs`** (ou `Código.gs`), apagando tudo o que tinha lá antes. 
-2. Atualize a variável `SUPABASE_KEY` no topo do código com a sua chave verdadeira (que começa com `eyJhbGci...`).
-3. Clique em **Implantar > Nova implantação**. Selecione o tipo de "Aplicativo da Web". Clique em **Implantar** e copie a "URL do aplicativo da Web".
-4. Vá em **Triggers** (Acionadores - ícone de relógio na lateral esquerda). Se você tiver algum trigger existente, certifique-se de que ele esteja chamando a função **`syncToSupabaseOnEdit`**, e que esteja configurado como `Da planilha` e `Ao editar`. (Apague qualquer trigger duplicado).
-5. No Supabase, vá em **Database > Webhooks**.
-6. Edite seu Webhook existente:
-   - Cole a NOVA "URL do aplicativo da Web" que você acabou de gerar no Google Apps Script.
-   - Em "Conditions", selecione **todas as 4 tabelas**: `funcionarios_epi`, `rh_movimentacoes`, `rh_absenteismo`, `rh_ferias`.
-   - Marque as caixas para Insert, Update, e Delete.
-   - Salve.
-
-Agora as 4 abas estão 100% integradas e sincronizadas para enviar e receber informações automaticamente!
-
----
-
-## 📝 Guia de Preenchimento das Planilhas
-
-Para que o Front-End (Painel de Indicadores) funcione corretamente, os dados devem ser preenchidos exatamente nos padrões abaixo. Atenção especial para os campos `tipo_movimentacao` e `motivo_saida`, que **devem** seguir as palavras-chave exatas.
-
-### Aba: `movimentacoes`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_admissao`, `data_desligamento`, `tipo_movimentacao`, `motivo_saida`, `mes_ref`
-
-**Regras:**
-* `tipo_movimentacao`: Preencher **apenas** com a palavra `entrada` ou `saida`
-* `motivo_saida` (Se for saída): Preencher **apenas** com a palavra `voluntario` (ex: pediu demissão) ou `involuntario` (ex: empresa demitiu)
-* `data_desligamento` e `motivo_saida`: Deixar **em branco** no caso de `entrada` (Admissão)
-* As datas podem ser preenchidas no formato **DD/MM/YYYY** (O sistema converterá automaticamente para o formato que o banco de dados aceita).
-
-| funcionario_nome | data_admissao | data_desligamento | tipo_movimentacao | motivo_saida | mes_ref |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| João da Silva | 15/01/2021 | 20/10/2023 | saida | voluntario | 10/2023 |
-| Maria Oliveira | 05/11/2023 | | entrada | | 11/2023 |
-| Carlos Souza | 10/05/2020 | 25/10/2023 | saida | involuntario | 10/2023 |
-
----
-
-### Aba: `absenteismo`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_inicio`, `data_fim`, `horas_previstas`, `horas_perdidas`, `motivo`
-
-**Regras Inteligentes do Sistema:**
-* A coluna `horas_previstas` assumirá **automaticamente 220 horas** caso você deixe a célula em branco. Mas se precisar, você pode preencher manualmente um valor diferente.
-* Se você preencher `data_inicio` e `data_fim` (formato DD/MM/YYYY), o sistema calculará as `horas_perdidas` **automaticamente** (8h/dia útil, 4h/sábado, 0h/domingo).
-* Se for apenas um atraso de algumas horas, você deixa `data_fim` em branco e preenche manualmente as `horas_perdidas` (ex: `2`).
-* A coluna de `mes_ref` foi removida da planilha e agora é detectada automaticamente a partir da `data_inicio`.
-* **Afastamentos longos (que viram o mês):** Divida em duas linhas. Ex: Se afastou de 15/10 a 15/11, crie uma linha de 15/10 a 31/10 e outra linha de 01/11 a 15/11. Isso garante que o cálculo das taxas seja proporcional ao mês exato.
-
-| funcionario_nome | data_inicio | data_fim | horas_previstas | horas_perdidas | motivo |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| João da Silva | 10/10/2023 | 11/10/2023 | 220 | 16 | Atestado médico |
-| Maria Oliveira | 05/11/2023 | | 220 | 2 | Atraso justificado |
-| Carlos Souza | 12/11/2023 | 12/11/2023 | 220 | 8 | Dores musculoesqueléticas |
-
----
-
-### Aba: `ferias`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_inicio_aquisitivo`, `data_fim_aquisitivo`, `data_vencimento`, `dias_direito`, `dias_gozados`, `status`
-
-| funcionario_nome | data_inicio_aquisitivo | data_fim_aquisitivo | data_vencimento | dias_direito | dias_gozados | status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Carlos Souza | 10/03/2021 | 09/03/2022 | 09/03/2023 | 30 | 30 | Concluído |
-| Maria Oliveira | 05/11/2023 | 04/11/2024 | 04/11/2025 | 30 | 0 | Pendente |
