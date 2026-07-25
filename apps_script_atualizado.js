@@ -1,18 +1,3 @@
-# Integração Google Sheets - Indicadores RH e Férias
-
-Este script permite que todas as abas (EPI, Turnover, Absenteísmo e Férias) no seu Google Sheets sejam sincronizadas de forma bidirecional com o Supabase.
-
-### 1. Preparar o Google Sheets
-Certifique-se de que sua planilha tenha as seguintes abas com os nomes EXATOS:
-- `Controle EPI e Fardamento`
-- `movimentacoes`
-- `absenteismo`
-- `ferias`
-
-### 2. Código Único para o Apps Script
-Substitua TODO o conteúdo do seu arquivo atual no Apps Script por este código abaixo. Ele unifica a lógica do EPI com a lógica dos Indicadores, para que um único Webhook funcione para tudo.
-
-```javascript
 // Função para calcular horas úteis entre duas datas
 function calcularHorasUteis(dataInicio, dataFim) {
   if (!dataInicio || !dataFim) return 0;
@@ -150,7 +135,7 @@ function formatarData(valor) {
 // Atualiza ou Insere um registro no Supabase
 function upsertRecord(tableName, nameField, payload) {
   const identificador = payload[nameField];
-    
+
   // Se a tabela usar "id" como chave e ele estiver ausente no payload (linha nova na planilha), é um INSERT direto
   if (nameField === "id" && (!identificador || identificador === "")) {
       try {
@@ -185,7 +170,7 @@ function upsertRecord(tableName, nameField, payload) {
         existingUrl = `${SUPABASE_URL}/rest/v1/${tableName}?${nameField}=eq.${encodeURIComponent(identificador)}`;
         urlWithSelect = tableName === "epi_funcao" ? existingUrl : `${existingUrl}&select=id`;
     }
-  
+
     const response = UrlFetchApp.fetch(urlWithSelect, {
       method: "get",
       headers: {
@@ -472,7 +457,7 @@ function syncAllToSupabase() {
     const config = SHEET_CONFIG[sheetName];
     const data = sheet.getDataRange().getValues();
     if (data.length <= 1) return; // Só tem cabeçalho
-    
+
     const columnsToFetch =
       sheetName === "Controle EPI e Fardamento" ? 13 : config.fields.length;
 
@@ -600,7 +585,7 @@ function doPost(e) {
           let idPlanilha = allData[i][0]; // Coluna A (index 0)
           let nomePlanilha = allData[i][1]; // Coluna B (index 1)
           let dataInicioPlanilha = allData[i][2]; // Coluna C (index 2)
-            
+
           if (record.id && idPlanilha == record.id) {
               rowToUpdate = i + 1;
               break;
@@ -635,7 +620,7 @@ function doPost(e) {
           }
       }
     }
-    
+
     if (type === "DELETE") {
       if (rowToUpdate !== -1) {
         sheet.deleteRow(rowToUpdate);
@@ -697,72 +682,3 @@ function doPost(e) {
     ).setMimeType(ContentService.MimeType.JSON);
   }
 }
-
-```
-
-### Passo a Passo para Implantar a Integração Unificada
-
-1. Cole o código acima no seu arquivo **`indicadores.gs`** (ou `Código.gs`), apagando tudo o que tinha lá antes. 
-2. Atualize a variável `SUPABASE_KEY` no topo do código com a sua chave verdadeira (que começa com `eyJhbGci...`).
-3. Clique em **Implantar > Nova implantação**. Selecione o tipo de "Aplicativo da Web". Clique em **Implantar** e copie a "URL do aplicativo da Web".
-4. Vá em **Triggers** (Acionadores - ícone de relógio na lateral esquerda). Se você tiver algum trigger existente, certifique-se de que ele esteja chamando a função **`syncToSupabaseOnEdit`**, e que esteja configurado como `Da planilha` e `Ao editar`. (Apague qualquer trigger duplicado).
-5. No Supabase, vá em **Database > Webhooks**.
-6. Edite seu Webhook existente:
-   - Cole a NOVA "URL do aplicativo da Web" que você acabou de gerar no Google Apps Script.
-   - Em "Conditions", selecione **todas as 4 tabelas**: `funcionarios_epi`, `rh_movimentacoes`, `rh_absenteismo`, `rh_ferias`.
-   - Marque as caixas para Insert, Update, e Delete.
-   - Salve.
-
-Agora as 4 abas estão 100% integradas e sincronizadas para enviar e receber informações automaticamente!
-
----
-
-## 📝 Guia de Preenchimento das Planilhas
-
-Para que o Front-End (Painel de Indicadores) funcione corretamente, os dados devem ser preenchidos exatamente nos padrões abaixo. Atenção especial para os campos `tipo_movimentacao` e `motivo_saida`, que **devem** seguir as palavras-chave exatas.
-
-### Aba: `movimentacoes`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_admissao`, `data_desligamento`, `tipo_movimentacao`, `motivo_saida`, `mes_ref`
-
-**Regras:**
-* O sistema agora calcula tudo de forma automática baseada nas datas, as colunas `tipo_movimentacao` e `mes_ref` não precisam mais ser preenchidas e serão ignoradas pelo sistema.
-* `motivo_saida` (Se for saída): Preencher **apenas** com a palavra `voluntario` (ex: pediu demissão) ou `involuntario` (ex: empresa demitiu)
-* `data_desligamento` e `motivo_saida`: Deixar **em branco** caso o colaborador ainda esteja ativo.
-* As datas podem ser preenchidas no formato **DD/MM/YYYY** (O sistema converterá automaticamente para o formato que o banco de dados aceita).
-
-| funcionario_nome | data_admissao | data_desligamento | tipo_movimentacao | motivo_saida | mes_ref |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| João da Silva | 15/01/2021 | 20/10/2023 | | voluntario | |
-| Maria Oliveira | 05/11/2023 | | | | |
-| Carlos Souza | 10/05/2020 | 25/10/2023 | | involuntario | |
-
----
-
-### Aba: `absenteismo`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_inicio`, `data_fim`, `horas_previstas`, `horas_perdidas`, `motivo`
-
-**Regras Inteligentes do Sistema:**
-* A coluna `horas_previstas` assumirá **automaticamente 220 horas** caso você deixe a célula em branco. Mas se precisar, você pode preencher manualmente um valor diferente.
-* Se você preencher `data_inicio` e `data_fim` (formato DD/MM/YYYY), o sistema calculará as `horas_perdidas` **automaticamente** (8h/dia útil, 4h/sábado, 0h/domingo).
-* Se for apenas um atraso de algumas horas, você deixa `data_fim` em branco e preenche manualmente as `horas_perdidas` (ex: `2`).
-* A coluna de `mes_ref` foi removida da planilha e agora é detectada automaticamente a partir da `data_inicio`.
-* **Afastamentos longos (que viram o mês):** Divida em duas linhas. Ex: Se afastou de 15/10 a 15/11, crie uma linha de 15/10 a 31/10 e outra linha de 01/11 a 15/11. Isso garante que o cálculo das taxas seja proporcional ao mês exato.
-
-| funcionario_nome | data_inicio | data_fim | horas_previstas | horas_perdidas | motivo |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| João da Silva | 10/10/2023 | 11/10/2023 | 220 | 16 | Atestado médico |
-| Maria Oliveira | 05/11/2023 | | 220 | 2 | Atraso justificado |
-| Carlos Souza | 12/11/2023 | 12/11/2023 | 220 | 8 | Dores musculoesqueléticas |
-
----
-
-### Aba: `ferias`
-
-Colunas esperadas na linha 1: `funcionario_nome`, `data_inicio_aquisitivo`, `data_fim_aquisitivo`, `data_vencimento`, `dias_direito`, `dias_gozados`, `status`
-
-| funcionario_nome | data_inicio_aquisitivo | data_fim_aquisitivo | data_vencimento | dias_direito | dias_gozados | status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Carlos Souza | 10/03/2021 | 09/03/2022 | 09/03/2023 | 30 | 30 | Concluído |
-| Maria Oliveira | 05/11/2023 | 04/11/2024 | 04/11/2025 | 30 | 0 | Pendente |
